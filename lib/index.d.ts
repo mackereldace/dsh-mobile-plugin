@@ -175,6 +175,18 @@ export interface MobileSelfcheck {
     /** 总判据：证书可用 且 DSH 前端探针没有"全不命中"。`unknown` 不算失败（不编也不误报）。 */
     readonly ok: boolean;
     readonly checkedAt: string;
+    /**
+     * ★ 第 50 轮（第二阶段取证通道）：最近几条宿主诊断（标签 + 摘要，已截断限量）。
+     *   为什么需要它 ✗：选择卡的事件类型名只能靠真机取证 ✓，
+     *   而诊断原先只进审计（`/mobile/audit` 是 **LOCAL_ONLY** ⇒ 手机读不到 ✗），
+     *   桌面端又没有可看的日志 ✗ ⇒ 手机上**没有任何出口** ✓。
+     *   这里复用**现成的**自检页 ✓（用户已经能从手机/局域网打开过它 ✓）。
+     * ★ 纪律：诊断里**不许出现票据/密钥原文**（沿用 PairLink.redact 那条规矩）。
+     */
+    readonly diagnostics?: ReadonlyArray<{
+        readonly tag: string;
+        readonly detail: string;
+    }>;
     readonly host: {
         readonly hostId: string;
         readonly hostName: string;
