@@ -187,6 +187,10 @@ export interface MobileSelfcheck {
         readonly tag: string;
         readonly detail: string;
     }>;
+    /** 端侧队列积压（只读计数）：一直涨 ⇒ 手机没在取（见自检页里的说明）。 */
+    readonly deviceQueue?: {
+        readonly pending: number;
+    };
     readonly host: {
         readonly hostId: string;
         readonly hostName: string;
