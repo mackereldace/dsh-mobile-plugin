@@ -734,6 +734,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     dshVersion: resolveDshRuntimeVersion({
       dshHome,
       /**
+       * ★ `exactOptionalPropertyTypes: true` ✗ —— 所以**不能**直接把 `string | undefined`
+       *   赋给可选属性 ✓（我第一次就是这么写的，`npm run build` 当场报 TS2379 ✓）。
+       *   按本项目既有写法用**条件展开** ✓：没这个字段时就不放这个键 ✓。
+       */
+      ...((process as unknown as { resourcesPath?: string }).resourcesPath === undefined
+        ? {}
+        : { resourcesPath: (process as unknown as { resourcesPath?: string }).resourcesPath as string }),
+      /**
        * ★★ 把宿主进程的 Electron resources 目录传进去 ✗ ——
        *   于是版本探测**先**读正在跑的那个 app 里那份 `dsh/package.json` ✓
        *   （2026-10-04：用户报"明明是 0.2.0 桌面版却显示 0.1.5-rc.2"✓ ——
@@ -741,7 +749,6 @@ export function apply(ctx: Context, config: Config = {}): void {
        *    重启之后还会退化成 `unknown` ✗。见 `dsh-version.ts` 的模块说明 ✓。）
        * ★ 非 Electron 环境（独立服务 / 本仓库跑测试 ✓）里它是 undefined ✓ ⇒ 自动跳过 ✓。
        */
-      resourcesPath: (process as unknown as { resourcesPath?: string }).resourcesPath,
     }),
     ...(bootScript === undefined ? {} : { bootScript }),
     trustedHosts,
