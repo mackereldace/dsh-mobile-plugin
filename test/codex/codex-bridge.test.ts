@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { CodexBridge, handleCodexEndpoint } from '../src/codex-bridge.ts'
+import { CodexBridge, handleCodexEndpoint } from '../../src/codex/codex-bridge.ts'
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/fake-codex-app-server.mjs', import.meta.url))
 

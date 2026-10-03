@@ -18,7 +18,7 @@
  * 顺手把 `tls/` 也搬过来，则手机上装过的自签 CA 也继续有效 ✓。
  * 拷贝（而不是共用）是为了避免两个进程同时写同一份 `devices.json` ✓。
  */
-import { type MobileHostService } from './index.ts';
+import { type MobileHostService } from '../index.ts';
 /** 手机入口路径：独立服务没有 DSH 外壳，直接进 Codex 页。 */
 export declare const STANDALONE_ENTRY_PATH = "/mobile/codex";
 /** 默认监听（刻意避开 DSH 插件的 3081/3443，两边可以同时跑）。 */

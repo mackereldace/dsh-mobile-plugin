@@ -27,12 +27,12 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
-import { createMobileHost, DEFAULT_CONFIG, type MobileHostService, type RemoteGateway } from './index.ts'
-import { DeviceStore } from './devices.ts'
-import { loadOrCreateHostIdentity } from './cordis.ts'
-import { createLanListener, type LanListener } from './lan-listener.ts'
-import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
-import { createTlsManager, type TlsManager } from './tls-cert.ts'
+import { createMobileHost, DEFAULT_CONFIG, type MobileHostService, type RemoteGateway } from '../index.ts'
+import { DeviceStore } from '../devices.ts'
+import { loadOrCreateHostIdentity } from '../cordis.ts'
+import { createLanListener, type LanListener } from '../lan-listener.ts'
+import { detectLanIp, isAddressPresent, listLanCandidates } from '../lan.ts'
+import { createTlsManager, type TlsManager } from '../tls-cert.ts'
 
 /** 手机入口路径：独立服务没有 DSH 外壳，直接进 Codex 页。 */
 export const STANDALONE_ENTRY_PATH = '/mobile/codex'
