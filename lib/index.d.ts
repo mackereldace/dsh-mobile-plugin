@@ -268,7 +268,9 @@ export interface MobileHostService {
      * **唯一入口**：HTTP 路由 `/mobile/device/call` 与（将来的）agent 工具都走它，
      * 于是"发给谁、能力是否已启用"的判定只有一处，两边不会走偏。
      */
-    deviceCall(capability: string, text: string, deviceId?: string): {
+    deviceCall(capability: string, text: string, deviceId?: string, 
+    /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */
+    sessionId?: string): {
         ok: true;
         id: string;
     } | {
