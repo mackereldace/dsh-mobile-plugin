@@ -32,6 +32,7 @@ export interface MachineConfigShape {
     trustedHosts?: string[];
     publicBaseUrl?: string;
     phoneBaseUrl?: string;
+    extraEndpoints?: string[];
     listener?: {
         enabled?: boolean;
         plain?: string;
@@ -43,6 +44,8 @@ export interface MachineConfigResult {
     trustedHosts: string[];
     publicBaseUrl?: string;
     phoneBaseUrl?: string;
+    /** 随配对票据下发的**额外端点** ✓（★ 必须含 **https** 那条 ✗ —— 见下面的说明 ✓）。 */
+    extraEndpoints: string[];
     listener: {
         enabled: boolean;
         plain: string;
