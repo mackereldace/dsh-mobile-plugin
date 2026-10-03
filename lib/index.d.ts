@@ -191,6 +191,20 @@ export interface MobileSelfcheck {
     readonly deviceQueue?: {
         readonly pending: number;
     };
+    /**
+     * ★ 第 74 轮：**这台电脑上的插件与 APK 是哪一版** ✓ ——
+     *   专门用来消灭"验了旧的"这种白费：用户验之前先看一眼这里，
+     *   就知道电脑端有没有更新到最新（而不是等验完发现不对再回头查 ✓）。
+     *   · `boot`：注入脚本里的构建戳（形如 BUILD-… ✓，与手机上看到的一致 ✓）；
+     *   · `apk`：插件旁边那份 APK 的字节数与修改时间 ✓（没有就如实说没有 ✓）。
+     */
+    readonly assets?: {
+        readonly boot: string;
+        readonly apk: {
+            readonly bytes: number;
+            readonly modifiedAt: string;
+        } | null;
+    };
     readonly host: {
         readonly hostId: string;
         readonly hostName: string;
