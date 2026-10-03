@@ -28,7 +28,8 @@ import { generateP256KeyPair } from '@dsh-mobile/protocol'
 import { DeviceStore } from './devices.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
-import { createLanListener, type LanListener } from './lan-listener.ts'
+import { createLanListener, DEFAULT_PLAIN_LISTEN, DEFAULT_TLS_LISTEN, type LanListener } from './lan-listener.ts'
+import { resolveMachineConfig } from './machine-config.ts'
 import {
   handleSetupRequest,
   readCurrentConfig,
@@ -590,6 +591,25 @@ export function apply(ctx: Context, config: Config = {}): void {
   const dataDirectory = join(dshHome, 'storages', 'dsh-mobile')
 
   /**
+   * ★★★ 2026-10-04：**机器专属配置的推导** ✓ —— 为的是让"从 GitHub 装完就能用"成立 ✓。
+   *
+   * 起因：我们的包是 bundle ✓ ⇒ 装完那一行会自动并进配置 ✓，但那一行**只有 id 与 name** ✗
+   * ⇒ `trustedHosts` / `publicBaseUrl` / `phoneBaseUrl` 得由部署方手填 ✓
+   * ⇒ 少填的现象是"**插件在跑、手机连不上**"✗（像插件坏了 ✓，很难猜到原因 ✓）。
+   * ⇒ 这里按**这台机器的实际地址**把缺的补上 ✓，并且**每一处补了什么都说出来** ✓
+   *   （出问题时用户能念出那一行 ✓）。
+   * ★ 三条纪律见 `machine-config.ts`：**只补缺** ✓ / **探测不到就不补、绝不编** ✗ / **说出来** ✓。
+   */
+  const machine = resolveMachineConfig(config, {
+    candidates: listLanCandidates(),
+    defaultPlain: DEFAULT_PLAIN_LISTEN,
+    defaultTls: DEFAULT_TLS_LISTEN,
+  })
+  for (const line of machine.derived) {
+    console.log(`[dsh-mobile] ${line}（如果这不是你要的，就在插件 config 里显式写好它）`)
+  }
+
+  /**
    * 局域网监听器（C1）：**默认关闭**，只有 `config.listener.enabled === true` 才起监听。
    *
    * 用 `let` 而不是 `const`：证书管理器的 `onResult` 回调需要引用它，而回调是在
@@ -660,7 +680,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const endpoints = createEndpointResolver(
     ctx.logger as unknown as { info?: (message: string) => void } | undefined,
     port,
-    config.publicBaseUrl !== undefined && config.publicBaseUrl.length > 0 ? config.publicBaseUrl : undefined,
+    machine.publicBaseUrl,
     Array.isArray(config.extraEndpoints) ? config.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0) : [],
   )
 
@@ -675,9 +695,9 @@ export function apply(ctx: Context, config: Config = {}): void {
    * ★ 监听失败只警告不抛错：手机入口不可用 ≠ DSH 挂掉。
    */
   listener = createLanListener({
-    enabled: config.listener?.enabled === true,
-    ...(config.listener?.plain === undefined ? {} : { plain: config.listener.plain }),
-    ...(config.listener?.tls === undefined ? {} : { tls: config.listener.tls }),
+    enabled: machine.listener.enabled,
+    plain: machine.listener.plain,
+    tls: machine.listener.tls,
     target: { host: '127.0.0.1', port },
     tlsPaths: tls.paths,
     logger: { info: (message) => console.log(message), warn: (message) => console.warn(message) },
@@ -686,7 +706,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // 复用 DSH 自己的 trustedHosts 配置：插件无法读取 Connection 的私有配置，
   // 因此让部署方在插件配置里显式声明（install 脚本会打印出该加什么）。
-  const trustedHosts = config.trustedHosts ?? []
+  const trustedHosts = machine.trustedHosts
 
   // 注入脚本：内容来自客户端插件包的构建产物；缺失时插件仍可用（只是手机浏览器页不会被注入）
   // 必须用 fileURLToPath：仓库/安装路径可能含非 ASCII 字符，URL.pathname 会返回
@@ -752,9 +772,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }),
     ...(bootScript === undefined ? {} : { bootScript }),
     trustedHosts,
-    ...(config.phoneBaseUrl === undefined || config.phoneBaseUrl.length === 0
-      ? {}
-      : { phoneBaseUrl: config.phoneBaseUrl }),
+    ...(machine.phoneBaseUrl === undefined ? {} : { phoneBaseUrl: machine.phoneBaseUrl }),
     // 传**函数**而不是路径：前端升级 / 安装位置变化不必重启插件（与原先一致 ✓）
     distIndex: () => distResolver.resolve(),
     renderIndex: (html) => ctx.webServer.renderIndex(html),
