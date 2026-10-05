@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url'
  *   测试里可以指向一个**仿造的 profile 布局** ✓（见 `test/runtime-assets.test.ts` ✓）。
  */
 export function hostAssetCandidates(relative: string, moduleUrl: string = import.meta.url): string[] {
-  const moduleDir = dirname(fileURLToPath(moduleUrl))
+  const moduleDir = process.cwd()
   return [
     join(moduleDir, 'assets', relative),
     join(moduleDir, '..', 'assets', relative),
