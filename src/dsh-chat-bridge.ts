@@ -41,6 +41,8 @@
 
 import { ErrorCode } from '@dsh-mobile/protocol'
 
+import { readHostRpcResult } from './gateway-rpc.ts'
+
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
 export type GatewayCaller = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>
 
@@ -55,6 +57,20 @@ export const DSH_CHAT_PATHS = {
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
 export interface DshChatDeps {
   readonly call: GatewayCaller
+  /**
+   * 「这条消息是**手机**经这条路提交的」登记回调（本次 `session/prompt` 的 `requestId`）。
+   *
+   * ★ **必须可选** ✗：既有测试与调用方是 `{ call }` 构造 deps 的 ✓，
+   *   改成必填会一次性弄红它们 ✓ —— 而这一层要的只是"能记一笔"，
+   *   不是"必须记"（没注入 ⇒ 少一条手机登记 ⇒ 工具退回 heuristic，**不会错报** ✓）。
+   *
+   * ★ 调用纪律（写在调用点旁边）：**网关成功之后**才调 ✓ ——
+   *   记早了会把"手机上点了发送、但 DSH 拒了"的消息也算成手机发的 ✗。
+   */
+  readonly recordPrompt?: (
+    ref: { readonly sessionId: string; readonly rpcId: string },
+    via: 'session/prompt' | 'mobile/dsh/send',
+  ) => void
 }
 
 /**
@@ -105,6 +121,24 @@ async function sendPrompt(deps: DshChatDeps, args: Record<string, unknown>, sign
     content: [{ type: 'text', text }],
   }
   const value = unwrap(await deps.call('session/prompt', { args: { request } }, signal))
+  /**
+   * ★★★ 登记「这条消息是手机经 `mobile/dsh/send` 提交的」。
+   *
+   * ## 为什么在这一行（`await` 之后 ✓）
+   *
+   * 登记表是 `client_source` 工具回答"手机还是电脑"的**事实来源** ⇒
+   * 只能记 **DSH 真收下的提交** ✓。放在 `call` 之前：手机上点了发送、而 DSH 把这条拒了 ✗
+   * ⇒ 表里多一条从没存在过的手机消息 ⇒ 工具给 agent 一个假结论 ✗（这一类错误没人看得出来）。
+   *
+   * ## 为什么 `requestId` 就是查得回来的那个键
+   *
+   * DSH 把 `session/prompt` 的 `requestId` 原样存进用户消息的来源元数据
+   * （`source = { kind: 'user', rpcId: request.requestId }`，见 `dsh-api-session-controller`
+   * 的 `prompt()` ✓）—— `client_source` 工具查的就是这个值 ✓。
+   *
+   * ★ `recordPrompt` 没注入时**什么都不做** ✓（回调是可选的 ⇒ 不弄红既有 `{ call }` 构造 ✓）。
+   */
+  deps.recordPrompt?.({ sessionId, rpcId: requestId }, 'mobile/dsh/send')
   return { ok: true, requestId, mode, sessionId, value: value === undefined ? null : value }
 }
 
@@ -249,17 +283,27 @@ function readArgs(payload: unknown): Record<string, unknown> {
 }
 
 /**
- * 拆网关返回的那层信封 ✓（`{ ok:true, value }` ✓）。
+ * 拆网关返回的那一层 ✓ —— **宽容两种真实形状** ✓（判据只有一处 ✓：`gateway-rpc.ts` 的
+ * `readHostRpcResult` ✓，这里**不许**再写第二套 ✗）。
  *
- * ★ 这个形状是**实测**来的：手机那边一直是 `response.result.ok` / `.value` 两层 ✓
- *   （`boot.js` 取 `session/list` / `session/modelCatalog` 都这样 ✓）
- *   ⇒ 网关端点本身的返回值就是 `{ok,value}` ✓。
+ * ## ★ 为什么必须宽容（第 106 轮的真机故障 ✗，已复现 ✓）
+ *
+ * 这一层的 `deps.call` 在生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓（`index.ts` 两处 ✓：
+ * 隧道那条 ✓ + `/mobile/chat/sessions` 那条 HTTP 路由 ✓），而它对 `session/*` 走的是
+ * `gateway.invoke(…)` ✓ —— 真 DSH 里 `invoke` 返回的是**裸业务值** ✓（`session/list` ⇒ `{sessions:[…]}` ✓，
+ * **没有 `ok` 字段** ✓）；只有 `dispatchRpc` 才返回 `{ok,value}` 信封 ✓（两者形状不同是**设计如此** ✓）。
+ *
+ * ⇒ 原先"只认信封"的写法拿裸值去查 `ok` ⇒ `undefined !== true` ⇒ 抛「网关拒绝了这次调用」✗
+ *   ⇒ `GET /mobile/chat/sessions` = **502** ✓（真机读数 ✓），
+ *     `sessions / read / send / create` **四个端点全坏** ✗
+ *   —— 而单测一直全绿 ✓，根因是**假网关两个形状都跟真 DSH 反了** ✗（已在本轮改真 ✓）。
+ *
+ * ★ 输出契约**没变** ✓：调用方看到的仍然是"业务值 or 抛错" ✓。
  */
 function unwrap(result: unknown): unknown {
-  if (result === null || typeof result !== 'object') return undefined
-  const envelope = result as { readonly ok?: unknown; readonly value?: unknown; readonly error?: unknown }
+  const { envelope } = readHostRpcResult(result)
   if (envelope.ok !== true) {
-    const error = envelope.error as { readonly message?: unknown; readonly code?: unknown } | undefined
+    const error = envelope.error
     const message = typeof error?.message === 'string' ? error.message : '网关拒绝了这次调用'
     throw Object.assign(new Error(message), { code: ErrorCode.Internal })
   }

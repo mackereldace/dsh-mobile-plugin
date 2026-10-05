@@ -50,6 +50,20 @@ export declare const DSH_CHAT_PATHS: {
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
 export interface DshChatDeps {
     readonly call: GatewayCaller;
+    /**
+     * 「这条消息是**手机**经这条路提交的」登记回调（本次 `session/prompt` 的 `requestId`）。
+     *
+     * ★ **必须可选** ✗：既有测试与调用方是 `{ call }` 构造 deps 的 ✓，
+     *   改成必填会一次性弄红它们 ✓ —— 而这一层要的只是"能记一笔"，
+     *   不是"必须记"（没注入 ⇒ 少一条手机登记 ⇒ 工具退回 heuristic，**不会错报** ✓）。
+     *
+     * ★ 调用纪律（写在调用点旁边）：**网关成功之后**才调 ✓ ——
+     *   记早了会把"手机上点了发送、但 DSH 拒了"的消息也算成手机发的 ✗。
+     */
+    readonly recordPrompt?: (ref: {
+        readonly sessionId: string;
+        readonly rpcId: string;
+    }, via: 'session/prompt' | 'mobile/dsh/send') => void;
 }
 /**
  * 处理一条 `mobile/dsh/*` 调用 ✓。

@@ -64,3 +64,36 @@ describe('通知文案的接线：电脑名必须由宿主接上（2026-10-05）
     assert.match(install.slice(0, install.indexOf('const channels')), /const machineName = machineDisplayName\(localMachineName\(\)\)/)
   })
 })
+
+/**
+ * ★ 2026-10-05 第三轮：通知栏里**只有一句** ✓ —— 原始细节改落**审计** ✓（可追溯不能丢 ✗）。
+ *
+ * 为什么单看 `notify-text.ts` 不够 ✗：那里全绿只证明"它把 `detail` 带出来了"✓ ——
+ * 而两种故障都长在**调用处**：
+ * · 调用处又把 `detail` 拼回通知正文 ✗（那正是用户嫌冗余、要求删掉的那一行 ✓）；
+ * · 调用处**不把** `detail` 落审计 ✗（用户看不到原文了、自检页也查不到 ⇒ 出了事无从取证 ✓）。
+ */
+describe('通知文案的接线：原始细节只进审计、不进通知（2026-10-05 第三轮）', () => {
+  it('★ 交给端侧通道的就是那一句（不许把 `detail` 拼回正文）', () => {
+    assert.match(cordis, /const text = composed\.body\n/, '通知正文必须直接取 composed.body')
+    assert.doesNotMatch(cordis, /const text = composed\.body \+/, '不许在正文后面再拼东西')
+    assert.match(cordis, /mobileHost\.deviceCall\('notify', text, undefined, sessionId, composed\.title\)/)
+  })
+
+  it('★ 原始细节落进 approval-push 审计（手机自检页照样能查 ⇒ 可追溯）', () => {
+    const install = cordis.slice(cordis.indexOf('function installApprovalPush('))
+    // 「拼正文」到「取会话 id」之间就是那段审计代码（`audited` 表达式 + recordDiagnostic ✓）
+    const audit = install.slice(install.indexOf('const text = composed.body'), install.indexOf('const sessionId'))
+    assert.match(audit, /'approval-push'/, '这一行仍然要落 approval-push 审计 ✓')
+    /**
+     * ★ 必须是"把 `detail` **拼进**审计那一行"✗✗ —— 不能只出现 `composed.detail`
+     *   就算数 ✓（它可能只是那个三元判断的条件 ✓，条件成立而原文压根没写进去 ✗，
+     *   这种"看着有、其实丢了"正是本条要挡的 ✓）。
+     */
+    assert.match(
+      audit,
+      /\+\s*composed\.detail/,
+      'approval-push 审计那一行必须把 composed.detail 拼进去（否则原文就彻底丢了）',
+    )
+  })
+})
