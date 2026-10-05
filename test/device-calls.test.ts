@@ -141,3 +141,48 @@ describe('端侧能力扩容（2026-09：2 个 → 5 个）', () => {
     assert.throws(() => queue.enqueue(PHONE, 'open', 'https://example.com'), /not enabled/)
   })
 })
+
+/**
+ * ★ 2026-10-05：通知**标题**（`Mac-mini-2024 需要你确认`）要真的走到手机那边。
+ *
+ * 病根形态：正文由宿主拼好 ✓、标题却写死在手机那一侧 ✗ ⇒
+ * "通知标题里没有电脑名"这件事在电脑端**完全看不出来**（推送照样返回 ok ✓）。
+ * ⇒ 这里钉住"标题是宿主随请求一起给的一个字段"（与既有的 `sessionId` 同一套规矩 ✓）。
+ */
+describe('端侧请求：通知标题随请求一起走（2026-10-05）', () => {
+  it('★ 入队时给的标题，手机取待办时原样拿到', () => {
+    const queue = new DeviceCallQueue()
+    queue.setEnabled(PHONE, 'notify', true)
+    const call = queue.enqueue(
+      PHONE,
+      'notify',
+      '允许一次提权到 danger-full-access\nbash escalate…',
+      undefined,
+      'Mac-mini-2024 需要你确认',
+    )
+    assert.equal(call.title, 'Mac-mini-2024 需要你确认')
+    const pending = queue.takePending(PHONE)
+    assert.equal(pending[0]?.title, 'Mac-mini-2024 需要你确认', '标题必须在交给手机的那一份里')
+  })
+
+  it('★ 不给标题就不放这个键（老调用行为逐字不变 ⇒ 手机自己退回旧标题）', () => {
+    const queue = new DeviceCallQueue()
+    queue.setEnabled(PHONE, 'notify', true)
+    const call = queue.enqueue(PHONE, 'notify', '一句话')
+    assert.equal('title' in call, false, '没给标题时不许凭空多一个 title: undefined')
+    const pending = queue.takePending(PHONE)
+    assert.equal('title' in (pending[0] ?? {}), false, '交给手机的那一份同样不许凭空多键')
+    // 空串按"没给"处理（与 sessionId 的既有规矩一致）
+    const empty = queue.enqueue(PHONE, 'notify', '一句话', undefined, '')
+    assert.equal('title' in empty, false)
+  })
+
+  it('★ 标题不参与"取件与回执"的判据（两台设备各拿各的，不串台）', () => {
+    const queue = new DeviceCallQueue()
+    for (const id of [PHONE, TABLET]) queue.setEnabled(id, 'notify', true)
+    queue.enqueue(PHONE, 'notify', '给手机的', undefined, 'Mac-mini-2024 需要你确认')
+    queue.enqueue(TABLET, 'notify', '给平板的', undefined, 'MacBook-Pro 需要你确认')
+    assert.deepEqual(queue.takePending(PHONE).map((call) => call.title), ['Mac-mini-2024 需要你确认'])
+    assert.deepEqual(queue.takePending(TABLET).map((call) => call.title), ['MacBook-Pro 需要你确认'])
+  })
+})

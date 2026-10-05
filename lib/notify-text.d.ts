@@ -31,18 +31,78 @@ export declare const NOTIFY_EVENT_TYPES: readonly string[];
 export declare const NOTIFY_EVENT_SUFFIXES: readonly string[];
 /** 这条事件类型要不要通知。 */
 export declare function shouldNotifyEvent(type: string | undefined | null): boolean;
+/** 原始细节那一行的上限（**含**省略号 ⇒ 整行恒 ≤ 这个数）。 */
+export declare const NOTIFY_DETAIL_MAX = 60;
+/** 一句人话那一行的上限。 */
+export declare const NOTIFY_SENTENCE_MAX = 40;
+/** 标题 + 正文的总长上限（超过就被系统通知栏截掉尾巴）。 */
+export declare const NOTIFY_TOTAL_MAX = 120;
+/** 标题里那个电脑名的上限（超过就留前 24 字 + `…`）—— 完整域名可以很长，标题不该被它撑爆。 */
+export declare const MACHINE_NAME_MAX = 24;
+/**
+ * 一台电脑在通知里**给人看的名字**（`Mac-mini-2024`）—— 手机上一眼认出"是哪台电脑"用它。
+ *
+ * ★ 为什么去掉 `.local` ✗：那是 Bonjour/mDNS 的后缀，只对解析有意义 ✓，
+ *   对"人念这个名字"是噪音 ✓。安卓外壳的面板行名**已经**是这么处理的 ✓
+ *   （`HomeModel` 里那条"去掉 `.local`"：`Mac-mini-2024.local` ⇒ `Mac-mini-2024` ✓）——
+ *   通知标题与面板行名必须是同一个名字，否则用户又要自己对齐两处 ✗。
+ * ★ 只去掉**结尾**那一个 `.local` ✗：完整域名 / Windows 裸名（`DESKTOP-ABC1234`）原样 ✓。
+ * ★ 上限 `MACHINE_NAME_MAX` 字 ✓：**留头去尾** —— 认得出来的是主机名那一段（`Mac-mini-2024` ✓），
+ *   域名尾巴是次要的 ✓（不设上限的话，一个长域名就能把正文整个挤没 ✗）。
+ * ★ 拿不到（空/空白/不是字符串）⇒ 返回**空串** ✓，调用方据此退回旧标题 ✓（绝不编名字 ✗）。
+ */
+export declare function machineDisplayName(raw?: string): string;
+/**
+ * 关键词 → **一句人话**（正文第一行）。
+ *
+ * ★ 为什么是映射表而不是一句写死的话 ✗✗：审批的原因五花八门 ✓
+ *   （提权 / 写工作区外 / 删文件 / 装依赖 / 联网 ✓），硬编码一句会**张冠李戴** ✗
+ *   —— 用户看到"允许写文件"却其实是"允许删文件"，比看不懂英文更糟 ✗。
+ * ★ 先命中者胜 ✓（顺序即优先级：`danger-full-access` 比"工作区外"更具体 ⇒ 排前面 ✓）。
+ * ★ 一条都不命中 ⇒ 由 `humanSentenceFor` 退回带工具名的一句 ✓（**绝不空着** ✗）。
+ */
+export declare const HUMAN_SENTENCES: ReadonlyArray<readonly [RegExp, string]>;
+/**
+ * 原始文本 ⇒ 一句人话（**≤ `NOTIFY_SENTENCE_MAX` 字**）。
+ *
+ * @param raw  原始文本（工具名 + 原因，宿主给什么就用什么 ✓）
+ * @param tool 工具名（一条关键词都没命中时，用它凑一句能念的话 ✓）
+ */
+export declare function humanSentenceFor(raw: string, tool?: string): string;
+/**
+ * 原始细节 ⇒ 正文第二行（**截断到 `NOTIFY_DETAIL_MAX` 字**，保留可追溯）。
+ *
+ * ★ 截断用一个 `…` 收尾 ✗：一是告诉用户"后面还有"（否则像内容本来就完了 ✓），
+ *   二是**整行仍然 ≤ 上限** ✓（先切到 `上限 - 1` 再补省略号 ✓）。
+ */
+export declare function detailLineFor(raw: string): string;
 /**
  * 通知文案（标题 + 正文）。纯函数，给断言用。
  *
- * @param type 事件类型
- * @param data 事件负载里能拿到的几个字段（都可能是 undefined）
+ * ## 形状（2026-10-05按用户真机反馈定稿 ✓）
+ *
+ * ```
+ * 标题：<电脑名> 需要你确认          ← 一眼看出是**哪台电脑** ✓
+ * 正文：允许一次提权到 danger-full-access   ← 第一行：一句人话（≤40 字 ✓）
+ *       bash escalate sandbox to danger-…   ← 第二行：原始细节（截断到 60 字 ✓）
+ *       会话 web-HbO3D4m                    ← 第三行：放得下才带（可选 ✓）
+ * ```
+ *
+ * 旧形状（用户 2026-10-04 截图的原文 ✗）：标题只有「需要你确认」✓（不知道是哪台电脑 ✗），
+ * 正文是 `电脑上的 agent 需要你确认：bash（escalate sandbox to danger-full-access: …）`✗
+ * —— 原始英文工具调用 + 沙箱术语、长到被系统截断 ⇒ 用户看不出"要我干什么"✗。
+ *
+ * @param type        事件类型
+ * @param data        事件负载里能拿到的几个字段（都可能是 undefined）
+ * @param machineName 本机机器名（宿主给 ✓；拿不到 ⇒ 省略号那一步退回旧标题 ✓）
  */
 export declare function notifyTextFor(type: string, data: {
     toolName?: unknown;
     reason?: unknown;
     title?: unknown;
     summary?: unknown;
-} | undefined): {
+    sessionId?: unknown;
+} | undefined, machineName?: string): {
     title: string;
     body: string;
 };

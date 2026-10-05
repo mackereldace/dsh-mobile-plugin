@@ -303,7 +303,9 @@ export interface MobileHostService {
      */
     deviceCall(capability: string, text: string, deviceId?: string, 
     /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */
-    sessionId?: string): {
+    sessionId?: string, 
+    /** ★ 2026-10-05：系统通知的标题（可选；形如 `Mac-mini-2024 需要你确认`）。 */
+    title?: string): {
         ok: true;
         id: string;
     } | {
