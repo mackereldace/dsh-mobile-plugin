@@ -25,6 +25,14 @@ import type {} from '@deepseek-ai/dsh-api-gateway'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { generateP256KeyPair } from '@dsh-mobile/protocol'
 
+import {
+  APPROVAL_ANSWERER_OPTIONS,
+  createPhoneAnswerer,
+  DEFAULT_APPROVAL_TTL_MS,
+  sharedApprovalBroker,
+  type AskedApprovals,
+} from './dsh-approval.ts'
+import { mountQuestionChannel, setDshChatChannels } from './dsh-question.ts'
 import { DeviceStore } from './devices.ts'
 import { machineDisplayName, notifyTextFor, questionTextFor, shouldNotifyEvent } from './notify-text.ts'
 import { localMachineName } from './lan-trust.ts'
@@ -44,6 +52,7 @@ import {
   createMobileHost,
   DEFAULT_CONFIG,
   isLoopbackRequest,
+  type GatewayPeer,
   type HostIdentity,
   type MobileHost,
   type MobileHostConfig,
@@ -72,6 +81,20 @@ export interface Config extends Partial<MobileHostConfig> {
   }
   /** 是否往 index.html 注入 shim（默认开启）。 */
   injectShim?: boolean
+  /**
+   * 选择卡 / 权限卡**由谁先画** ✓（默认 `official` ✓）。
+   *
+   * - `official`（默认 ✓）：**不拦截** DSH 的 `approval/request` / `user-questions/request`
+   *   ⇒ 官方卡片在电脑与手机（DSH 界面）上**立即出现** ✓，手机直接点官方卡作答 ✓。
+   * - `phone-first`（旧行为 ✓）：插件 `prepend` 到 waterfall **最外层**、先把请求拦下来等手机 ✓，
+   *   超时（60 秒）才 `return next()` 交回官方卡 ✗ —— 期间**下游的官方卡一个字都没画** ✗。
+   *   只留给**旧版原生会话页**（`/mobile/chat`，非默认入口）✓。
+   *
+   * ★ 2026-10-28 用户反馈「选择卡和权限卡无论手机还是电脑都要等好久才出现」✓ ——
+   *   根因就是旧默认 `phone-first` 把官方卡挡在身后 ✓（本文件的注释早就写着这一条 ✓）。
+   *   `official` 下推送**不丢** ✓：审批/选择通知本来就走 `session/event` ✓，不靠 waterfall ✓。
+   */
+  phoneCardMediation?: 'official' | 'phone-first'
   /**
    * 要读写的 profile 名（默认**从插件自身的位置推断**，见 `setup-config.ts`）。
    *
@@ -504,6 +527,62 @@ export function readWebServerPort(webServer: unknown): number | undefined {
 }
 
 /**
+ * ★★★ 造一个「取调用方 Peer」的函数 —— **DSH 0.2.1 把手机端弄挂的那个参数的来源** ✓。
+ *
+ * ## 为什么必须有它（2026-10-18 真机审计定因 ✓）
+ *
+ * 0.2.1 的 `dsh-api-gateway` 在 `prepareInvocation` / `openWireStream` 的**第一句**就
+ * `assertPeerLive(peer)` ⇒ `peer.signal` ⇒ 我们不带 peer 时抛
+ * `Cannot read properties of undefined (reading 'signal')` ✓（详见 `index.ts` 的 `GatewayPeer`）。
+ * 而 0.2.0 的 `request.peer ?? this.operatorPeer()` 兜底在 0.2.1 里**被删掉了** ✗
+ * （`operatorPeer()` 方法本身也不存在了 ✓）。
+ *
+ * ## 按版本取（顺序就是优先级 ✓）
+ *
+ * 1. `connection.browserPeer`（**0.2.1+**）—— "The Peer every authenticated browser
+ *    connection shares" ✓，principal = `{kind:'owner'}` ✓、interactions 默认 `'answer'` ✓。
+ * 2. `connection.operator`（**≤0.2.0**）—— 当年 `gateway.operatorPeer()` 返回的就是它 ✓
+ *    ⇒ 行为与升级前完全一致 ✓。
+ * 3. `connection.createPeer({ principal: { kind: 'owner' } })` —— 两个字段都没有时的兜底 ✓
+ *    （peer 的寿命挂在 connection 上，本插件只建一次 ✓）。
+ *
+ * ★ 用 `ctx.get('connection')` 而**不往 `inject` 里加**它（与 `ctx.get('tools')` 同一个理由 ✓）：
+ *   独立服务 / 测试环境里可能没有 connection —— 那种环境**不该因为少一个服务就加载失败** ✗。
+ *   取不到 ⇒ 返回 undefined ⇒ 退回旧行为，并**只警告一次**（不刷屏 ✓）。
+ */
+export function createGatewayPeerResolver(ctx: unknown): () => GatewayPeer | undefined {
+  let cached: GatewayPeer | undefined
+  let warned = false
+  return () => {
+    if (cached !== undefined) return cached
+    const connection = (ctx as { get?: (name: string) => unknown } | undefined)?.get?.('connection') as
+      | {
+          readonly browserPeer?: GatewayPeer
+          readonly operator?: GatewayPeer
+          readonly createPeer?: (options: { principal: { kind: string } }) => GatewayPeer
+        }
+      | undefined
+    const direct = connection?.browserPeer ?? connection?.operator
+    if (direct !== undefined) {
+      cached = direct
+      return cached
+    }
+    if (typeof connection?.createPeer === 'function') {
+      cached = connection.createPeer({ principal: { kind: 'owner' } })
+      return cached
+    }
+    if (!warned) {
+      warned = true
+      console.warn(
+        '[dsh-mobile] 取不到 DSH 的「调用方 Peer」（connection 服务不可用）⇒ 在 DSH ≥0.2.1 上手机端全部 RPC 会失败' +
+          '（报错是 Cannot read properties of undefined (reading \'signal\')）。其余功能不受影响。',
+      )
+    }
+    return undefined
+  }
+}
+
+/**
  * "还没配置手机接入"那行启动提示（★ 只在真的没配置时才打，别刷屏 ✗）。
  *
  * 两副面孔：
@@ -689,6 +768,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   const gateway = ctx.typertGateway as unknown as RemoteGateway
 
   /**
+   * ★ DSH 0.2.1 起网关的每次调用都要带「调用方 Peer」（见 `createGatewayPeerResolver`）——
+   * 传**函数**：connection 服务可能比本插件晚就绪，而真正需要它是在手机发第一条 RPC 时。
+   */
+  const gatewayPeer = createGatewayPeerResolver(ctx)
+
+  /**
    * ── 局域网监听（C1）：按配置起明文 / TLS 监听 ──────────────────────────
    *
    * ★ **默认关闭**：`config.listener?.enabled !== true` 时一行都不做 ⇒ 老部署行为不变。
@@ -747,6 +832,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     store,
     identity,
     gateway,
+    // ★ DSH 0.2.1 起：每次网关调用都要带它（取不到时退回旧行为，见上面那个 resolver）
+    gatewayPeer,
     endpoints,
     // 回源通道要用端口做环回请求（复用插件自己的 HTTP 路由，不另写一套）
     selfPort: port,
@@ -794,6 +881,28 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
   })
+
+  /**
+   * ★★ 2026-10-28：默认**不拦**官方卡（`official` ✓）—— 见 `Config.phoneCardMediation` 的长注释 ✓。
+   *
+   * 旧行为（`phone-first`）把 `user-questions/request` 拦在最外层等手机 ✓，
+   * 最长 60 秒里下游的官方选择卡**一个字都没画** ✗ ⇒ 用户看到「发了但第一时间看不到卡」✗。
+   * 现在默认直接放行 ⇒ 电脑与手机的官方卡立即出现 ✓；手机直接点官方卡作答 ✓。
+   */
+  const phoneFirstCards = config.phoneCardMediation === 'phone-first'
+  if (phoneFirstCards) {
+    try {
+      const mounted = mountQuestionChannel(ctx as unknown as Parameters<typeof mountQuestionChannel>[0], error => {
+        console.warn('[dsh-mobile] 手机选择应答出错，交回桌面卡：', error)
+      })
+      console.log(`[dsh-mobile] 手机选择应答${mounted ? '已挂载' : '未挂载'}（user-questions/request；phone-first；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）`)
+    } catch (error) {
+      console.warn('[dsh-mobile] 手机选择应答未挂载：', error)
+    }
+  } else {
+    setDshChatChannels({ question: false })
+    console.log('[dsh-mobile] 选择卡交给 DSH 官方卡片（即时显示；未挂载 phone-first 中介）')
+  }
 
   /**
    * 把端侧通道暴露给 agent：注册 `phone_notify` 工具。
@@ -931,12 +1040,42 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
 
     const channels: Array<[string, (() => void) | undefined]> = []
+    /** ★ 手机裁决那条水路挂上没有 ✓ —— 与"推送"**分开记** ✗（两件事 ✓；混在一起会互相掩盖 ✓）。 */
+    let answererMounted = false
     try {
       const anyCtx = ctx as unknown as {
-        on?: (name: string, handler: (...args: unknown[]) => void) => unknown
+        /**
+         * ★ 形参写 `never[]` 是**故意的** ✗：两个处理器形状不同
+         *   （`session/event` 是 `(session, event)` ✓、`approval/request` 是 `(request, next)` ✓），
+         *   而 `never` 可赋给任何形参 ⇒ 两种形状都进得来 ✓，
+         *   同时**不放弃**"返回值必须显式检查"这条 ✓（用 `unknown` 而不是 `any` ✗）。
+         */
+        on?: (
+          name: string,
+          handler: (...args: never[]) => unknown,
+          options?: { prepend?: boolean },
+        ) => unknown
         events?: { on?: (name: string, handler: (...args: unknown[]) => void) => unknown }
       }
-      if (typeof anyCtx.on === 'function') {
+      /**
+       * ★★ 最近一次 `approval/asked`（按会话 ✓）—— 这是**唯一**能把 waterfall 里那个
+       *   `request` 和"会话日志里那条 asked 的 id"对上号的线索 ✗。
+       *
+       * 为什么非要这个 id ✗：`approval/request` 的载荷里**没有 id** ✓
+       *   （只有 agent / toolName / callId / reason / signal ✓ —— id 是在
+       *    `dsh-user-approval/lib/index.js:131` 才生成、`:132` 才 append 进日志的 ✓）；
+       *   而手机页上那个 id 是**从会话日志读到的** ✓（`approval/asked.data.id` ✓）
+       *   ⇒ 认不出同一个 id，手机点的那一下就**永远落不到**这条请求上 ✓。
+       *
+       * 为什么**不会有竞态** ✗：`session.append()` 是**同步**派发观察者的 ✓
+       *   （`dsh-session/lib/index.js:1471-1473` ✓：先 `this.log.push(event)` ✓、
+       *    紧接着 `invokeContainedSessionObservers(…)` ✓），
+       *   而 waterfall 要**下一跳微任务**才跑 ✓（`dsh-user-approval/lib/index.js:176`
+       *   的 `Promise.resolve().then(…)` ✓）⇒ 应答者跑起来时这张表**一定**已经写好了 ✓。
+       */
+      const lastAsked: AskedApprovals = new Map()
+
+      if (typeof anyCtx.on === 'function' && phoneFirstCards) {
         // ★ 正确的观察方式是 `session/event`（DSH 自己的宿主插件都这么写：
         //   dsh-agent-instructions / dsh-agent-loop / dsh-agent-presets ✓✓），
         //   而不是我原先猜的 `approval/asked` ✗ —— Cordis 对未知事件名**静默接受**，
@@ -1007,17 +1146,82 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             return
           }
+          /**
+           * ★★ 审批的**记账**（不是推送 ✓）：记下这条会话最近一条 ask 的 id ✓；
+           *   裁决一落地就按 id 清掉 ✓ —— **桌面答的也算** ✓（桌面答完 DSH 同样会 append
+           *   `approval/decided` ✓ ⇒ 两条路共用这一本账 ✓，「手机答过的不再给按钮」也就有了依据 ✓）。
+           *
+           * ★★ 这里**不许 return** ✗：`approval/asked` 还要继续走下面的推送 ✓
+           *   （`shouldNotifyEvent` 认它 ✓ —— `notify-text.ts` 的 `NOTIFY_EVENT_TYPES` ✓）；
+           *   一旦在这里提前返回，手机上就**再也收不到审批通知**了 ✓。
+           */
+          if (kind === 'approval/asked' || kind === 'approval/decided') {
+            const sessionId = sessionIdOf(_session, event)
+            const data = (record.data ?? {}) as { id?: unknown; toolName?: unknown; callId?: unknown; reason?: unknown }
+            const id = typeof data.id === 'string' ? data.id : ''
+            if (sessionId !== undefined && id.length > 0) {
+              if (kind === 'approval/decided') {
+                if (lastAsked.get(sessionId)?.id === id) lastAsked.delete(sessionId)
+              } else {
+                lastAsked.set(sessionId, {
+                  id,
+                  toolName: typeof data.toolName === 'string' ? data.toolName : '',
+                  callId: typeof data.callId === 'string' && data.callId.length > 0 ? data.callId : undefined,
+                  reason: typeof data.reason === 'string' && data.reason.length > 0 ? data.reason : undefined,
+                })
+              }
+            }
+          }
           if (!shouldNotifyEvent(kind)) return
           notify(kind, { ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) })
         }
         anyCtx.on('session/event', onSessionEvent)
         channels.push(['ctx.on(session/event)', undefined])
       }
-      // 兼容另外两个可能的事件名（不同 DSH 版本暴露的名字不一样；
-      // 多订一个的代价只是"可能多推一条"，而漏订的代价是"功能完全不工作" ✗）
+
+      /**
+       * ★★ 手机裁决的**唯一**接线点 ✗✓ —— 把原先那两行**假推送**换成**真应答者** ✓。
+       *
+       * 改前是这两行 ✓：
+       *
+       * ```
+       * anyCtx.on('approval/asked', (payload) => notify('approval/asked', payload))
+       * anyCtx.on('approval/request', (payload) => notify('approval/asked', payload))
+       * ```
+       *
+       * 两条都**没用** ✗：
+       * · `approval/asked` **不是** cordis 事件名 ✓（Cordis 对未知事件名**静默接受** ✓
+       *   ⇒ "注册成功"却永不触发 ✓）；
+       * · `approval/request` **确实是** waterfall ✓，可那个处理器既不调 `next()` 也不返回值 ✓
+       *   ⇒ 只要它排到链首，就会**把官方审批卡一起吞掉** ✓（今天没炸，只因为它被 `push` 到最后 ✓）。
+       * ★ 推送**不靠这两行** ✓：`approval/asked` 本来就走上面的 `session/event` ✓
+       *   ⇒ 删掉它们**不会丢推送** ✓。
+       *
+       * ★★ `prepend: true` **不是可选项** ✗：cordis 的 waterfall 是**严格顺序、外层先跑** ✓
+       * （`cordis/src/events.ts:228` ✓；落点是同一文件 `:255` 的 `prepend ? 'unshift' : 'push'` ✓），
+       * 而本插件由 `cordis.patch.yml` 的 insert 挂在**所有 bundle 之后** ✓
+       * ⇒ 默认（`push`）会排在上游那个转发器**下游** ✗ ⇒ 手机**永远轮不到** ✓。
+       * 先例：DSH 自己的 ACP 插件同样是 `ctx.on('approval/request', (request, next) => …)` ✓
+       * （`dsh-acp/lib/index.js:1116-1139` ✓）。
+       *
+       * ★★ `broker.open()` 的 `null` 是**契约** ✗：超时 / 被替换 ⇒ 我们必须 `return next()` ✓，
+       * 把这次审批**交回下游**（官方那张桌面卡 ✓）—— 不这么做，手机不答就把官方 UI 一起卡死 ✓。
+       */
       if (typeof anyCtx.on === 'function') {
-        anyCtx.on('approval/asked', (payload: unknown) => notify('approval/asked', payload))
-        anyCtx.on('approval/request', (payload: unknown) => notify('approval/asked', payload))
+        /**
+         * ★ 应答者本体在 `dsh-approval.ts` ✓（纯逻辑 ✓ ⇒ 能拿**真** cordis 在单测里跑 ✓）——
+         *   这里只做**接线** ✓：给它 broker ✓、给它那本账 ✓、把 `prepend` 那条铁律交给
+         *   同一个常量（`APPROVAL_ANSWERER_OPTIONS` ✓ ⇒ "去掉 prepend"一定会被打红 ✓）。
+         */
+        const answerFromPhone = createPhoneAnswerer({
+          broker: sharedApprovalBroker(),
+          asked: lastAsked,
+          onError: (error) => {
+            console.warn('[dsh-mobile] 手机裁决这条路出错（交回桌面卡，不影响审批本身）：', error)
+          },
+        })
+        anyCtx.on('approval/request', answerFromPhone, APPROVAL_ANSWERER_OPTIONS)
+        answererMounted = true
       }
     } catch (error) {
       console.warn('[dsh-mobile] 审批推送订阅失败（其余功能不受影响）：', error)
@@ -1026,6 +1230,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       console.warn('[dsh-mobile] 审批推送**未挂载**：当前 DSH 未提供可用的会话事件订阅通道')
     } else {
       console.log(`[dsh-mobile] 审批推送已挂载（通道：${channels.map(([name]) => name).join(' + ')}）`)
+    }
+    /**
+     * ★ 这一行是排障的第一站 ✓（真机现象："手机上点了没反应"✗ 时，先看它在不在 ✓）：
+     *   在 ⇒ 水路挂上了 ✓，问题在"等/答"那一段 ✓；不在 ⇒ 根本没挂上 ✓，看上面那行警告 ✓。
+     */
+    if (answererMounted) {
+      setDshChatChannels({ approval: true })
+      console.log(
+        `[dsh-mobile] 手机裁决已挂载（approval/request, prepend；${Math.round(DEFAULT_APPROVAL_TTL_MS / 1000)} 秒无人应答 ⇒ 交回桌面卡）`,
+      )
+    } else {
+      setDshChatChannels({ approval: false })
+      if (phoneFirstCards) {
+        console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效')
+      } else {
+        console.log('[dsh-mobile] 审批卡交给 DSH 官方卡片（即时显示；未挂载 phone-first 中介）')
+      }
     }
   }
 

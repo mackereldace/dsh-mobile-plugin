@@ -18,7 +18,7 @@
 import { execFileSync } from 'node:child_process'
 import type { KeyObject } from 'node:crypto'
 import { randomBytes, randomInt } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, unlinkSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Duplex } from 'node:stream'
@@ -163,6 +163,12 @@ export function callOpenWireStream(
   endpoint: string,
   payload: unknown,
   signal: AbortSignal,
+  /**
+   * ★ 调用方 Peer（DSH 0.2.1 起必需 ✓）。第 4 位就是 `peer` ——
+   * 原先这里传的是 `undefined` ✓，在 0.2.1 上 `$events` 会在
+   * `assertPeerLive(peer)` 那一句当场抛 `reading 'signal'` ✗（审计里 44 条全这个 ✓）。
+   */
+  peer?: GatewayPeer,
 ): Promise<AsyncIterable<unknown>> {
   const open = gateway.openWireStream
   if (typeof open !== 'function') throw new TypeError('gateway.openWireStream 不存在')
@@ -174,8 +180,8 @@ export function callOpenWireStream(
    *   ★ 原来的代码是对的（`options.gateway.openWireStream(...)` **方法调用** ✓）——
    *   是我为了抽函数把它改坏的 ✓。所以这里统一用 `.call(gateway, …)` ✓。
    */
-  // ≥5 个形参 ⇒ 新版六参签名（signal 在第 5 位、第 6 位要一个 AbortController ✓）
-  if (open.length >= 5) return open.call(gateway, endpoint, payload, undefined, undefined, signal, new AbortController())
+  // ≥5 个形参 ⇒ 新版六参签名（第 4 位 peer、第 5 位 signal、第 6 位 AbortController ✓）
+  if (open.length >= 5) return open.call(gateway, endpoint, payload, undefined, peer, signal, new AbortController())
   // 否则按老三参（signal 在第 3 位 ✓）
   return open.call(gateway, endpoint, payload, signal)
 }
@@ -264,6 +270,54 @@ export interface HostIdentity {
 }
 
 /**
+ * ★★ 「调用方 Peer」—— DSH **0.2.1 起，网关的每一次调用都必须带它** ✗（2026-10-18 定位 ✓）。
+ *
+ * ## 为什么需要这个类型（这一行是 0.2.1 把手机端弄挂的根因 ✓）
+ *
+ * DSH **0.2.0-rc.2** 的 `dsh-api-gateway` 里，`prepareInvocation` 最后是：
+ *
+ * ```js
+ * new GatewayInvocation({ … }, descriptor.service, request.peer ?? this.operatorPeer(), signal, …)
+ * ```
+ *
+ * ⇒ `invoke()` / `stream()` **不带 peer 也能跑** ✓（DSH 自己补一个 operator Peer ✓）。
+ * 插件正是靠这个"可省"活了很久 ✓。
+ *
+ * DSH **0.2.1-rc.2** 把这条兜底**删掉了** ✗：
+ *
+ * ```js
+ * async prepareInvocation(request, control) {
+ *   const endpoint = endpointOf(request.namespace, request.method);
+ *   assertPeerLive(request.peer, endpoint);          // ← 第一句就读 peer.signal
+ *   …
+ * }
+ * function assertPeerLive(peer, endpoint) {
+ *   if (peer.signal.aborted) …   // ← peer 是 undefined ⇒ TypeError
+ * }
+ * ```
+ *
+ * 并且 `operatorPeer()` **整个方法都不存在了** ✗（`0.2.0` 有、`0.2.1` grep 命中 0 次 ✓）。
+ * ⇒ 调用不带 peer 时的报错是 **`Cannot read properties of undefined (reading 'signal')`** ✓ ——
+ * 从字面上完全看不出"少了个 peer" ✗（真机审计里 115 条 RPC 全是这一句 ✓）。
+ *
+ * ## peer 从哪来（DSH 自己的两个来源，按版本不同）
+ *
+ * · **0.2.1+**：`connection.browserPeer` —— "The Peer every authenticated browser
+ *   connection shares" ✓，principal 就是 `{ kind: 'owner' }` ✓，`interactions` 默认 `'answer'` ✓
+ *   （网关转发 `$events` 要求 `interactions === 'answer'` ✓）。
+ * · **≤0.2.0**：`connection.operator`（`OperatorPeer`）✓ —— 也就是当年 `operatorPeer()`
+ *   返回的那个对象 ✓ ⇒ 行为与升级前**完全一致** ✓。
+ * · 两者都没有时，才用 `connection.createPeer({ principal: { kind: 'owner' } })` 兜底 ✓。
+ *
+ * 只声明本插件会用到的字段（`signal` 是网关 `assertPeerLive` 唯一读的东西 ✓）。
+ */
+export interface GatewayPeer {
+  readonly signal: AbortSignal
+  readonly principal?: { readonly kind?: string }
+  readonly interactions?: string
+}
+
+/**
  * DSH Typert Gateway 的最小接口。
  *
  * 刻意只声明本插件用到的两个方法：
@@ -277,12 +331,19 @@ export interface RemoteGateway {
     readonly method: string
     readonly args: Readonly<Record<string, unknown>>
     readonly signal?: AbortSignal
+    /**
+     * ★ 调用方 Peer —— DSH **0.2.1 起是必需参数** ✗（见下方 `GatewayPeer`）。
+     * 省略时只有 ≤0.2.0 还能靠 DSH 自己兜底。
+     */
+    readonly peer?: GatewayPeer
   }): Promise<unknown>
   stream(request: {
     readonly namespace: string
     readonly method: string
     readonly args: Readonly<Record<string, unknown>>
     readonly signal?: AbortSignal
+    /** 同 `invoke`：0.2.1 起必需。 */
+    readonly peer?: GatewayPeer
   }): Promise<AsyncIterable<unknown>>
   /**
    * 流式调用的**传输层入口**（DSH 自己的 HTTP mux 与 WebSocket mux 都用它）。
@@ -569,6 +630,15 @@ export function createMobileHost(options: {
   readonly store: DeviceStore
   readonly identity: HostIdentity
   readonly gateway: RemoteGateway
+  /**
+   * ★ 取「调用方 Peer」的函数 —— DSH **0.2.1 起网关必需**（见 `GatewayPeer` 的长注释 ✓）。
+   *
+   * 传**函数**而不是对象：`connection` 服务可能比本插件晚就绪 ✓，而且每台机器
+   * 只在第一次真调网关时才有必要去解析 ✓（解析结果由 `cordis.ts` 缓存 ✓）。
+   * 省略 ⇒ 沿用旧行为（不带 peer）—— 那在 0.2.1 上会让**所有**手机 RPC 失败 ✗，
+   * 所以只有独立服务 / 测试替身才该省略 ✓。
+   */
+  readonly gatewayPeer?: () => GatewayPeer | undefined
   /** 可用连接地址（用于二维码 payload 与 manifest）。 */
   readonly endpoints: () => string[]
   /** 本机 DSH 的监听端口（回源通道要用它做环回请求）。 */
@@ -887,12 +957,23 @@ export function createMobileHost(options: {
     return out
   }
 
-  /** 把隧道内的 RPC 载荷转成 Gateway 调用参数（与 DSH 的 remoteRequest 语义一致）。 */
+  /**
+   * 把隧道内的 RPC 载荷转成 Gateway 调用参数（与 DSH 的 remoteRequest 语义一致）。
+   *
+   * ★ 0.2.1 起**必须**带 `peer` ✗（见 `GatewayPeer` 的长注释）：这里统一取一次，
+   * 于是 `invoke()` / `stream()` 两条路都不会漏 ✓。
+   */
   function toGatewayArgs(
     endpoint: string,
     payload: unknown,
     signal: AbortSignal,
-  ): { namespace: string; method: string; args: Readonly<Record<string, unknown>>; signal: AbortSignal } {
+  ): {
+    namespace: string
+    method: string
+    args: Readonly<Record<string, unknown>>
+    signal: AbortSignal
+    peer?: GatewayPeer
+  } {
     const { namespace, method } = parseEndpoint(endpoint)
     if (typeof payload !== 'object' || payload === null) {
       throw Object.assign(new Error('Remote payload must be a plain object'), { code: ErrorCode.HandshakeMalformed })
@@ -907,7 +988,15 @@ export function createMobileHost(options: {
     if (typeof args !== 'object' || args === null || Array.isArray(args)) {
       throw Object.assign(new Error('Remote args must be a plain object'), { code: ErrorCode.HandshakeMalformed })
     }
-    return { namespace, method, args: args as Record<string, unknown>, signal }
+    const peer = options.gatewayPeer?.()
+    return {
+      namespace,
+      method,
+      args: args as Record<string, unknown>,
+      signal,
+      // ★ exactOptionalPropertyTypes：没有 peer 时**不放这个键** ✓（放 `undefined` 通不过类型检查 ✓）
+      ...(peer === undefined ? {} : { peer }),
+    }
   }
 
   /**
@@ -982,6 +1071,7 @@ export function createMobileHost(options: {
           endpoint: string,
           payload: unknown,
           signal: AbortSignal,
+          peer?: GatewayPeer,
         ) => Promise<{ ok: true; value: unknown } | { ok: false; error: { code?: string; message?: string; details?: unknown } }>
       }
       if (typeof dispatch.dispatchRpc !== 'function') {
@@ -989,7 +1079,8 @@ export function createMobileHost(options: {
           code: ErrorCode.CapabilityDenied,
         })
       }
-      const envelope = await dispatch.dispatchRpc(endpoint, payload, signal)
+      // ★ 第 4 位 peer：0.2.1 起必需（`$events/result` 还要 principal.kind === 'owner' ✓）
+      const envelope = await dispatch.dispatchRpc(endpoint, payload, signal, options.gatewayPeer?.())
       if (envelope.ok === true) return envelope.value
       const failure = envelope.error ?? {}
       throw Object.assign(new Error(String(failure.message ?? 'gateway rejected the call')), {
@@ -1015,15 +1106,16 @@ export function createMobileHost(options: {
     signal: AbortSignal,
   ): Promise<{ readonly envelope: unknown }> {
     const dispatch = gateway as unknown as {
-      dispatchRpc?: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
+      dispatchRpc?: (endpoint: string, payload: unknown, signal: AbortSignal, peer?: GatewayPeer) => Promise<unknown>
     }
     if (typeof dispatch.dispatchRpc === 'function') {
       /**
        * ★ 宿主侧 RPC 入口（`connection.rpc.intercept('/api', …)` 用的就是它 ✓）：
        *   它返回的才是**带附件表的信封** ✓（`encodeRpcResult` 在那里把字节换成 null 占位 + 收进 attachments ✓）。
        * ★ `dispatchRpc` **失败不抛**、返回 `{ok:false,error}` ✗ ⇒ 这里转成 throw ✓。
+       * ★ 第 4 位 peer：0.2.1 起必需（漏了就是 `reading 'signal'` ✓ —— 手机端**全部** RPC 会挂 ✗）。
        */
-      const raw = await dispatch.dispatchRpc(endpoint, payload, signal)
+      const raw = await dispatch.dispatchRpc(endpoint, payload, signal, options.gatewayPeer?.())
       if (raw !== null && typeof raw === 'object' && (raw as { ok?: unknown }).ok === false) {
         const failure = (raw as { error?: { code?: unknown; message?: unknown } }).error ?? {}
         throw Object.assign(new Error(String(failure.message ?? '网关拒绝了这次调用')), {
@@ -1054,6 +1146,15 @@ export function createMobileHost(options: {
       // 反向控制（M5）：手机的文件与控制权
       'phone/files': 'phoneFs',
       'phone/control': 'phoneControl',
+      'mobile/dsh/references': 'fsRead',
+      'session/attachment': 'fsRead',
+      'mobile/manage/capabilities': 'fsRead',
+      'mobile/manage/settings/read': 'fsRead',
+      'mobile/manage/plugins/list': 'fsRead',
+      'mobile/manage/plugins/read': 'fsRead',
+      'mobile/manage/settings/write': 'fsWrite',
+      'mobile/manage/plugins/configure': 'fsWrite',
+      'mobile/manage/plugins/set-enabled': 'fsWrite',
     }
 
     let need = required[endpoint]
@@ -1214,6 +1315,32 @@ export function createMobileHost(options: {
           if (device === undefined) {
             throw Object.assign(new Error('session has no bound device'), { code: ErrorCode.DeviceUnknown })
           }
+          /**
+           * ★★ 插件自有的**本地流路由**（本轮新增 ✓）：`mobile/dsh/follow` ⇒ DSH 的 `session/follow`。
+           *
+           * ## 为什么必须有这一跳 ✗
+           *
+           * 桥的纪律是「**手机只认 `mobile/dsh/*`**」✓（`dsh-chat-bridge.ts` 头部 ✓）——
+           * 页面直接去喊 `session/follow` 就把那条纪律破了 ✓（页面上任何一处写法都能绕过插件这一层）。
+           * ⇒ 转发那一跳留在宿主 ✓，页面只知道 `mobile/dsh/follow` ✓。
+           *
+           * ## 与 `invoke` 那半的对应关系 ✓
+           *
+           * `invokeLocalEndpoint`（`:1122` ✓）管一元的 `mobile/*` ✓，这里管**流**的 ✓ ——
+           * 同一条理由：它们不是 DSH 命名空间里的端点 ✓，设备身份已由隧道握手保证 ✓。
+           * 门禁仍然照跑 ✓（`capabilityCheck(device, request.endpoint)` ✓ ——
+           * 判的是**手机嘴里那个名字** ✗，不是转发后的 `session/follow` ✓）。
+           *
+           * ## 只做**改名**，不做翻译 ✗
+           *
+           * 参数形状**由页面给** ✓（照官方客户端 ✓：`{ args: { request: { address, maxMessages, turnWindow } } }` ✓，
+           * `SessionFollowRequest` 里没有 `cursor` ✓）——这里**一个字段都不补、一个都不改** ✓：
+           * 每多一层"翻译"，就多一处"照着想的形状写"的机会 ✓（本项目为此栽过 ✓）。
+           *
+           * ★ 审计里记的是**手机嘴里那个名字** ✓（下面 `target: request.endpoint` ✓）——
+           *   真机排查时要对得上页面的日志 ✓（`__DSH_MOBILE_BOOT__.streamLog()` ✓）。
+           */
+          const upstream = request.endpoint === 'mobile/dsh/follow' ? 'session/follow' : request.endpoint
           const gate = capabilityCheck(device, request.endpoint)
           if (!gate.ok) {
             // 流式调用此前**没有审计**：一旦被门禁拒绝，手机上表现为"发送无反应"，
@@ -1225,7 +1352,7 @@ export function createMobileHost(options: {
             async *[Symbol.asyncIterator]() {
               const started = Date.now()
               try {
-                const iterable = await openGatewayStream(request.endpoint, request.payload, signal)
+                const iterable = await openGatewayStream(upstream, request.payload, signal)
                 yield* iterable
                 // 流正常结束才记成功：否则"流被拒/中断"会伪装成成功，掩盖真实故障
                 store.record({ deviceId: device.deviceId, kind: 'stream', target: request.endpoint, detail: `${Date.now() - started}ms`, ok: true })
@@ -2388,8 +2515,10 @@ export function createMobileHost(options: {
     signal: AbortSignal,
   ): Promise<AsyncIterable<unknown>> {
     if (typeof options.gateway.openWireStream === 'function') {
-      return callOpenWireStream(options.gateway, endpoint, payload, signal)
+      // ★ peer 在第 4 位：0.2.1 起 `openWireStream` 第一句就是 `assertPeerLive(peer)` ✗
+      return callOpenWireStream(options.gateway, endpoint, payload, signal, options.gatewayPeer?.())
     }
+    // `stream()` 走 `toGatewayArgs` ⇒ peer 已在里面带上 ✓
     return options.gateway.stream(toGatewayArgs(endpoint, payload, signal))
   }
 
@@ -2488,15 +2617,38 @@ export function createMobileHost(options: {
     device: DeviceRecord,
   ): Promise<unknown | undefined> {
     if (!endpoint.startsWith('mobile/')) return undefined
+    if (endpoint.startsWith('mobile/manage/')) {
+      const gate = capabilityCheck(device, endpoint)
+      if (!gate.ok) throw Object.assign(new Error(gate.message), { code: gate.code })
+      const { handleManagementEndpoint, MOBILE_MANAGEMENT_PATHS } = await import('./mobile-management.ts')
+      if (!(Object.values(MOBILE_MANAGEMENT_PATHS) as readonly string[]).includes(endpoint)) throw new Error('未知管理接口')
+      return handleManagementEndpoint({
+        call: (target, args, innerSignal) => invokeGatewayEndpoint(options.gateway, target, args, innerSignal ?? signal),
+        codex: { managementRequest: (method, args, innerSignal) => getCodexBridge().managementRequest(method, args, innerSignal) },
+      }, endpoint, payload, signal)
+    }
 
     // ── 会话页数据面（我们自己的页面用它承载 DSH 的输出）──────────────────
     // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
     // 设备身份已由隧道握手保证；桥的职责见 dsh-chat-bridge.ts（认 DSH 的形状只在那一个文件里）。
     if (endpoint.startsWith('mobile/dsh/')) {
+      const gate = capabilityCheck(device, endpoint)
+      if (!gate.ok) throw Object.assign(new Error(gate.message), { code: gate.code })
       // ★ 这里用**动态 import** ✗ 而不是文件顶部的静态 import ✓ ——
       //   顶部那一段是**别的单正在改的地方** ✗，插进去就会把两单搅在同一次提交里 ✓。
       //   动态 import 只加载一次（模块系统自己缓存 ✓），代价可以忽略 ✓。
       const { handleDshChatEndpoint } = await import('./dsh-chat-bridge.ts')
+      /**
+       * ★ 手机裁决那个中间人也走**同一种**动态 import 姿势 ✓（理由同上 ✓，顶部不动 ✓）。
+       *
+       * ★★ 为什么取的是 `sharedApprovalBroker()` 而**不是** `createApprovalBroker()` ✗：
+       *   「等」在 `cordis.ts`（waterfall 应答者 ✓）、「答」在这条路由 ✓ ——
+       *   两处**必须**是**同一个实例** ✗，否则各在一个空表里自说自话 ✓：
+       *   手机上点下去只会得到 `ok:false`✓，而两边看起来都"挂载成功"✓（最难查的一类 ✗）。
+       *   `sharedApprovalBroker()` 是模块级单例 ✓ ⇒ 两处 `import` 到同一个文件 ⇒ 同一个实例 ✓。
+       */
+      const { sharedApprovalBroker } = await import('./dsh-approval.ts')
+      const { sharedQuestionBroker } = await import('./dsh-question.ts')
       return handleDshChatEndpoint(
         {
           call: (target, payload, bridgeSignal) =>
@@ -2510,6 +2662,8 @@ export function createMobileHost(options: {
            * 不从别处猜 ✗（猜错就是给 agent 一个假来源）。
            */
           recordPrompt: (ref, via) => recordPrompt(ref, via, device),
+          approvalBroker: sharedApprovalBroker(),
+          questionBroker: sharedQuestionBroker(),
         },
         endpoint,
         payload,
@@ -2962,7 +3116,32 @@ export function createMobileHost(options: {
          *   所以这里保留原来的 `matchesTrusted`：Host 腿放宽（干掉手传 IP），
          *   Origin 腿不跟着放宽（安全不倒退）。
          */
-        if (!sameAsHost && !(originUrl !== undefined && matchesTrusted(originUrl, trustedUpgradeHosts))) {
+        /**
+         * ★ 2026-10-28 追加（真机「换源后局域网端点 403 / 只能走 tail」✓）：
+         *   **Origin 与 Host 不同源、但 Origin 是"本机地址 + 与 Host 相同的端口"** ⇒ 放行 ✓。
+         *
+         * 场景：手机页面从 Tailscale 源加载（Origin = `100.x:3453` ✓），boot.js 的候选回退
+         * 去连**局域网端点**（Host = `10.x:3453` ✓）—— 两个都是这台机器的地址 ✓、
+         * 端口就是本插件的监听端口 ✓。原先 Origin 腿只认**静态**列表 ⇒ 403 ✗
+         * ⇒ 用户看到「校园网局域网突然 refuse、只能走 tail」✗（本机 10-28 真机现场 ✓）。
+         *
+         * 为什么这样仍安全（两条都不能省 ✗）：
+         *   · **端口必须与请求 Host 相同** ✓ —— "同主机不同端口"依旧是跨源
+         *     （T6 ⑤ 钉着 `:9999` 必须拒 ✓；那条判据原样保留 ✓）；
+         *   · **Origin 必须是自推导的本机地址/主机名** ✓ —— 任意恶意域名仍然拒 ✓
+         *     （`matchesDerivedTrust` 不解析名字、只比本机地址与本机 hostname ✓）。
+         * ⇒ 只有"同一台机器的另一个地址 + 同一个插件端口"这一种跨源被放行 ✓，
+         *   而它恰好就是换源候选回退唯一合法的形态 ✓。
+         */
+        const samePortAsHost = originUrl !== undefined && originUrl.port === authority.port
+        const derivedLocalOrigin = originUrl !== undefined && matchesDerivedTrust(originUrl, upgradeTrust)
+        if (
+          !sameAsHost &&
+          !(
+            originUrl !== undefined &&
+            (matchesTrusted(originUrl, trustedUpgradeHosts) || (samePortAsHost && derivedLocalOrigin))
+          )
+        ) {
           refuse(`Origin ${originHeader} 与 Host 不同源、也不在受信集合内`)
           return
         }
@@ -3584,6 +3763,19 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
         'app.js': 'app.js',
         'ui.js': 'ui.js',
         'poller.js': 'poller.js',
+        'projection.js': 'projection.js',
+        'conversation.js': 'conversation.js',
+        'trace.js': 'trace.js',
+        'composer.js': 'composer.js',
+        'navigation.js': 'navigation.js',
+        'stats.js': 'stats.js',
+        'shell.js': 'shell.js',
+        'management.js': 'management.js',
+        'management.css': 'management.css',
+        'native-tokens.css': 'native-tokens.css',
+        'native.css': 'native.css',
+        'file-panel.css': 'file-panel.css',
+        'whale.svg': 'whale.svg',
       }
       /**
        * ★★ 这里必须显式标类型 ✗ —— `npm test` 是**擦类型**跑的 ✓、从不做类型检查 ✓，
@@ -3621,7 +3813,7 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           'cache-control': 'no-store, must-revalidate',
           pragma: 'no-cache',
           'content-security-policy':
-            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:",
+            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data: blob:",
           'referrer-policy': 'no-referrer',
           'x-content-type-options': 'nosniff',
           'x-dsh-mobile': 'dsh-chat-page',
@@ -3676,7 +3868,17 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           pragma: 'no-cache',
           'x-dsh-mobile': 'desktop-wallpaper',
         })
-        res.end(readFileSync(found.path))
+        const wallpaperBytes = readFileSync(found.path)
+        res.end(wallpaperBytes)
+        /**
+         * ★ 2026-10-29：HEIC/TIFF 转码出来的临时 JPEG 用完就删 ✓（`phoneWallpaper` 的
+         *   `dshm-wallpaper-` 前缀 ✓）；原文件（用户自己的壁纸）绝不删 ✗。
+         */
+        try {
+          if (found.path.includes('dshm-wallpaper-')) unlinkSync(found.path)
+        } catch {
+          /* 删不掉不影响这次响应 */
+        }
         return true
       }
 
@@ -3771,7 +3973,7 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           return true
         }
         const body = asset
-        const type = name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8'
+        const type = name.endsWith('.css') ? 'text/css; charset=utf-8' : name.endsWith('.svg') ? 'image/svg+xml' : 'text/javascript; charset=utf-8'
         res.writeHead(200, {
           'content-type': type,
           'content-length': String(body.length),

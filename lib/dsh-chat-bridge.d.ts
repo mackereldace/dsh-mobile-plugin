@@ -69,9 +69,10 @@
  * 与 `mobile/codex/*` 一样放在**能力门禁之前** ✓（设备身份已由隧道握手保证 ✓）。
  */
 import type { ApprovalBroker } from './dsh-approval.ts';
+import { type QuestionBroker } from './dsh-question.ts';
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
 export type GatewayCaller = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>;
-/** 我们自己的路径 ✓（手机认这四个 ✓）。 */
+/** 手机页面使用本桥的业务路径；上游 typert 参数留在宿主转换。 */
 export declare const DSH_CHAT_PATHS: {
     readonly sessions: "mobile/dsh/sessions";
     readonly read: "mobile/dsh/read";
@@ -85,6 +86,16 @@ export declare const DSH_CHAT_PATHS: {
      * 落到 `dsh-approval.ts` 那个中间人上 ✓（真正生效的地方是 `cordis.ts` 的 waterfall 应答者 ✓）。
      */
     readonly approval: "mobile/dsh/approval";
+    readonly question: "mobile/dsh/question";
+    readonly upload: "mobile/dsh/upload";
+    readonly capabilities: "mobile/dsh/capabilities";
+    readonly interactions: "mobile/dsh/interactions";
+    readonly catalog: "mobile/dsh/catalog";
+    readonly selectModel: "mobile/dsh/select-model";
+    readonly command: "mobile/dsh/command";
+    readonly references: "mobile/dsh/references";
+    readonly cancel: "mobile/dsh/cancel";
+    readonly goal: "mobile/dsh/goal";
 };
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
 export interface DshChatDeps {
@@ -112,6 +123,7 @@ export interface DshChatDeps {
      *   假装成功 ⇒ 手机上显示"已处理"✓ 而电脑上那张卡还挂着 ✓ —— 最难查的一类 ✗。
      */
     readonly approvalBroker?: ApprovalBroker;
+    readonly questionBroker?: QuestionBroker;
 }
 /**
  * 处理一条 `mobile/dsh/*` 调用 ✓。
@@ -266,12 +278,17 @@ export declare function normalizePage(value: unknown): Record<string, unknown>;
  * ★ 桥**不替页面算这个百分比** ✗：算出来就是往数据层里塞显示口径 ✓（四舍五入/封顶都是画法 ✓）；
  *   而**缺字段时返回 `null` 而不是 `0`** 这条纪律，写在报告里交给页面 ✓。
  *
- * ## 白名单纪律（为什么三个投影要**逐字段**过一遍 ✗）
+ * ### 4. `contextBreakdown` — 上下文详情中的启发式组成
+ *
+ * 本机 DSH 0.2.0-rc.2 `dsh-token-meter/lib/types/breakdown-projection.js` 的
+ * `wire.viewSchema`：`systemTokens` / `toolsTokens` / `messageTokens` 均为非负整数。
+ * 这是保留表面的启发式估算；不能冒充提供方报告的上下文压力或 token 用量。
+ *
+ * ## 白名单纪律（统计与详情投影均逐字段验证）
  *
  * · **认不出就整个键都不输出** ✗（源里没有 / 不是对象 / 字段不是合法数字 ✓）——
  *   **绝不补 0** ✓、绝不补 `null` 占位 ✓（本仓栽过"编一个看起来合理的数"✓）；
- * · 这三个投影外面还有 `contextBreakdown` / `turnOutline` / `goal` / `subagent*` 等 16 个键 ✓
- *   （生产实测 `values` 一共 19 个键 ✓）—— **一个都不转** ✗，理由同模块注释第 2 条 ✓。
+ * · 其余内部投影仍不整包转出；目标栏另外使用逐字段验证的原版 `goal` 视图。
  */
 export declare function normalizeValues(value: unknown): Record<string, unknown>;
 /**

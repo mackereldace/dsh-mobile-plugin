@@ -1191,6 +1191,51 @@ test('端到端：流式 RPC 经隧道按序送达并结束', async () => {
       { seq: 1, text: '第一页' },
       { seq: 2, text: '第二页' },
     ])
+    /**
+     * ★ 反向控制（本轮加 ✓）：**只认 `mobile/dsh/follow` 那一条** ✗ ——
+     *   别的流端点照旧原样转发 ✓。变异成"所有流都改名/多加一跳"时这条必红 ✓。
+     */
+    assert.deepEqual(env.calls, [{ namespace: 'session', method: 'history', args: { sessionId: 's-1', limit: 50 } }])
+  } finally {
+    env.cleanup()
+  }
+})
+
+/**
+ * ★★ 会话页那条流走的是**本地流路由**（本轮新增 ✓）：`mobile/dsh/follow` ⇒ `session/follow`。
+ *
+ * ## 为什么非有不可 ✗
+ *
+ * 桥的纪律是「手机只认 `mobile/dsh/*`」✓ ⇒ 页面喊的是 `mobile/dsh/follow` ✓，
+ * 转发那一跳在宿主的 `openStream` 里 ✓。这一跳要是没接上，
+ * 手机上的形状是**光秃秃一句报错**（页面上"读取出错"✓），而宿主审计里只有
+ * `failed: …` 两个字的线索 ✓ —— 不是那种"看一眼就知道"的故障 ✓。
+ *
+ * ★ 参数那一半同样要钉死 ✗：请求形状**由页面给**（`{ args: { request } }` ✓，
+ *   照官方客户端 ✓）⇒ 宿主**一个字段都不许补、不许改** ✓
+ *   （`SessionFollowRequest` 里没有 `cursor` ✓ —— 多补一个字段就是那类"照着想的形状写"✗）。
+ *
+ * ★ 变异判据：把 `index.ts` 里那句 `request.endpoint === 'mobile/dsh/follow' ? 'session/follow' : …`
+ *   改回原样（不转发）⇒ **恰好**本用例变红 ✓（网关会收到 `mobile/dsh/follow` ⇒ 断言当场不成立 ✓）。
+ */
+test('★★ 本地流路由：mobile/dsh/follow 被转发到会话的 session/follow，且参数一个字段都不改', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    const request = {
+      address: { kind: 'session', sessionId: 's-1' },
+      maxMessages: 500,
+      turnWindow: { minMessages: 50, minTurns: 2 },
+    }
+    const items = await mobile.collectStream('mobile/dsh/follow', { request })
+    /** ① 帧**原样**回到手机 ✓（这条路由只改名，不改任何产出 ✓）。 */
+    assert.deepEqual(items, [
+      { seq: 1, text: '第一页' },
+      { seq: 2, text: '第二页' },
+    ])
+    /** ② 网关收到的是 **DSH 的**端点名 ✓（不转发的话这里会是 `mobile/dsh/follow` ✗）。 */
+    assert.deepEqual(env.calls, [{ namespace: 'session', method: 'follow', args: { request } }])
   } finally {
     env.cleanup()
   }
@@ -1217,6 +1262,52 @@ test('能力位门禁：未授予 fsWrite 时写操作被拒绝，且记录审�
   } finally {
     env.cleanup()
   }
+})
+
+test('管理目录与设置读写由设备能力分别授权，拒绝请求不进入任一后端', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: false, fsWrite: false } })
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    const reads = ['capabilities', 'settings/read', 'plugins/list', 'plugins/read']
+    const writes = ['settings/write', 'plugins/configure', 'plugins/set-enabled']
+    for (const backend of ['dsh', 'codex']) for (const path of [...reads, ...writes]) {
+      const count = env.calls.length
+      const response = await mobile.call('mobile/manage/' + path, { backend, id: 'fixture', value: true, enabled: false, revision: 1 })
+      assert.equal(response.ok, false, path)
+      assert.equal(response.error?.code, ErrorCode.CapabilityDenied, path)
+      assert.match(response.error?.message ?? '', new RegExp(reads.includes(path) ? 'fsRead' : 'fsWrite'))
+      assert.equal(env.calls.length, count, '被拒绝的管理操作不得转发到 Gateway')
+    }
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: true } })
+    const before = env.calls.length
+    const unknown = await mobile.call('mobile/manage/unknown-write', { backend: 'dsh' })
+    assert.equal(unknown.ok, false); assert.equal(env.calls.length, before, '未知管理接口不能回退到网关')
+  } finally { env.cleanup() }
+})
+
+test('会话页的引用与原版附件先受设备 fsRead 门禁约束，再进入本地桥或网关', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: false } })
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    for (const [endpoint, args] of [
+      ['mobile/dsh/references', { sessionId: 's-1', query: 'private', quoted: true }],
+      ['session/attachment', { request: { sessionId: 's-1', attachmentId: 'image-1' } }],
+    ] as const) {
+      const result = await mobile.call(endpoint, { args })
+      assert.equal(result.ok, false)
+      assert.equal(result.error?.code, ErrorCode.CapabilityDenied)
+      assert.match(result.error?.message ?? '', /fsRead/)
+    }
+    assert.equal(env.calls.length, 0, '拒绝发生在任何文件、会话查询或附件网关调用之前')
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: true } })
+    const allowed = await mobile.call('session/attachment', { args: { request: { sessionId: 's-1', attachmentId: 'image-1' } } })
+    assert.equal(allowed.ok, true)
+    assert.equal(env.calls.at(-1)?.method, 'attachment')
+  } finally { env.cleanup() }
 })
 
 test('界面启动与发消息所需调用不得被门禁拦（真实故障的回归）', async () => {
