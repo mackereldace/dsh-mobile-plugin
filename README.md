@@ -69,5 +69,8 @@ bundle 只给"行"（`id` / `name` ✓）；**这台机器**该用哪个地址�
    工作区构建（命令菜单/斜杠菜单/子智能体入口/统计小窗/版本探测/动态壁纸都在里面 ✓）。
    主仓的 `HEAD` 现已能正常 `npm run build` ✓；这个仓库仍保留"快照"做法，是因为
    DSH 插件管理装的是**整个包**，不需要在安装侧再构建 ✓。
-2. 本包**不含**桥（`@dsh-mobile/bridge`）—— DSH 那边 `blockExoticSubdeps` 挡着，
-   桥必须自己是 bundle ⇒ **官方这条路要装两次**（host 一次、bridge 一次）。
+2. **客户端桥已经并进本包** ✓ —— `@dsh-mobile/bridge` 的浏览器半就是本包的
+   `lib/client.js` ✓，`package.json` 的 `dsh.client` 声明了它 ✓。一次安装就带
+   命令插入 / slash 触发源 / sidebarRight 这些 DSH 客户端钩子 ✓；桥的宿主半本来
+   就是空 `apply` ✓，host 自己已有 cordis 行（客户端 bundle 注册要求的 graph 行 ✓）
+   ⇒ **不需要第二个包** ✓，`blockExoticSubdeps` 也不会被触发 ✓。
