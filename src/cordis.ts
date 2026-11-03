@@ -1339,6 +1339,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ? undefined
       : ctx.webServer.tapIndex((html) => html.replace('<head>', `<head>\n    ${shimTag}`))
 
+
   /**
    * 4) 手机端应用外壳：挂在**本插件自己的前缀** `/mobile/app` 下。
    *

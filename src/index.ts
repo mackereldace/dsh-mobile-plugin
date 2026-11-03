@@ -1220,7 +1220,27 @@ export function createMobileHost(options: {
           }
           // 插件自有的隧道内端点在能力门禁**之前**处理：它们不是 DSH 的命名空间，
           // 门禁不认识它们；设备身份已由上面的 resolveEstablishedDevice 保证。
-          const local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device)
+          /**
+           * ★★★ 2026-10-31：**本地端点失败也必须记审计** ✗ ——
+           *   原先这一句 `await invokeLocalEndpoint(...)` 在 try/catch **之外** ✓ ⇒
+           *   `mobile/files/read` 一类失败（工作区根为空 / 路径越界 / 文件不存在）**一条都不留** ✗
+           *   ⇒ 手机上"图片空着"、审计里干干净净 ✓ —— 排查时等于瞎的 ✓。
+           *   现在把失败原因（`local failed: <message>`）也写进审计 ✓，成功那条照旧 ✓。
+           */
+          let local: unknown
+          try {
+            local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            store.record({
+              deviceId: device.deviceId,
+              kind: 'rpc',
+              target: request.endpoint,
+              detail: `local failed: ${message.slice(0, 160)}`,
+              ok: false,
+            })
+            throw error
+          }
           if (local !== undefined) {
             store.record({ deviceId: device.deviceId, kind: 'rpc', target: request.endpoint, detail: 'local', ok: true })
             // ★ 本地端点返回的是**值** ⇒ 包成信封（= 改动前 tunnel 那层包法 ✓，形状不变 ✓）
@@ -1859,6 +1879,14 @@ export function createMobileHost(options: {
     return removed
   }
 
+  /**
+   * 配对二维码的载荷 —— `createPairing` 与 QR 路由**共用这一处** ✓
+   * （两边各拼一次字符串，迟早一边改了另一边没改 ✗）。
+   */
+  const pairingPayloadOf = (ticket: PairingTicket): string =>
+    Buffer.from(JSON.stringify(ticket), 'utf8').toString('base64url')
+  const pairingQrPayloadOf = (ticket: PairingTicket): string => `dshmobile://pair?d=${pairingPayloadOf(ticket)}`
+
   const service: MobileHostService = {
     store,
     /**
@@ -1927,7 +1955,7 @@ export function createMobileHost(options: {
       store.record({ deviceId: '(host)', kind: 'pair-code', detail: `配对码 ${code}，有效期至 ${expiresAt}`, ok: true })
       return {
         ticket,
-        qrPayload: `dshmobile://pair?d=${Buffer.from(JSON.stringify(ticket), 'utf8').toString('base64url')}`,
+        qrPayload: pairingQrPayloadOf(ticket),
         expiresAt,
       }
     },
@@ -2041,7 +2069,7 @@ export function createMobileHost(options: {
       const pairing = pendingByCode.get(String(code).trim())
       if (pairing === undefined) return undefined
       if (pairing.state !== 'open') return undefined
-      return Buffer.from(JSON.stringify(pairing.ticket), 'utf8').toString('base64url')
+      return pairingPayloadOf(pairing.ticket)
     },
     connectedCount: () => sessions.size,
     connectedSession: (deviceId) => sessions.get(deviceId),
@@ -2429,6 +2457,36 @@ export function createMobileHost(options: {
       return
     }
 
+    /**
+     * ★ 2026-10-31 临时诊断：在工作区根下**真的**读一次文件，把 roots 与错误原样回给本机 ✓。
+     *   排查"手机上图片空着"时，它能区分三种原因：工作区根为空 / 路径越界 / 文件不存在 ✓。
+     *   只在 loopback（见 LOCAL_ONLY 名单）✓，不涉及任何写操作 ✓。
+     */
+    if (req.method === 'GET' && url.pathname === '/mobile/debug/fs-probe') {
+      const probePath = url.searchParams.get('path') ?? ''
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 5000)
+      try {
+        const roots = await listWorkspaceRoots(controller.signal)
+        const report: Record<string, unknown> = { path: probePath, roots }
+        try {
+          const chunk = await readChunk(probePath, 0, 1024 * 1024, roots)
+          report['ok'] = true
+          report['bytes'] = chunk.bytes
+          report['size'] = chunk.size
+          report['eof'] = chunk.eof
+        } catch (error) {
+          const failure = error as { code?: string; message?: string }
+          report['ok'] = false
+          report['error'] = { code: failure.code ?? null, message: String(failure.message ?? error) }
+        }
+        respondJson(res, 200, report)
+      } finally {
+        clearTimeout(timer)
+      }
+      return
+    }
+
     if (req.method === 'GET' && url.pathname === '/mobile/audit') {
       respondJson(res, 200, {
         entries: service.listAudit({
@@ -2778,6 +2836,26 @@ export function createMobileHost(options: {
         default:
           return undefined
       }
+    }
+
+    /**
+     * ★ 2026-10-31：图片桥的**端侧取证**（`boot.js` 在 adopt / ok / failed 时各报一次）✓。
+     *   只写审计、不改任何行为 ✓ —— 手机上看不到图时，这是唯一能把原因带回电脑的通道 ✓。
+     */
+    if (endpoint === 'mobile/img/diag') {
+      const args = readLocalArgs(payload)
+      const phase = typeof args['phase'] === 'string' && args['phase'].length > 0 ? args['phase'].slice(0, 24) : 'unknown'
+      const path = typeof args['path'] === 'string' ? args['path'].slice(0, 300) : ''
+      const reason = typeof args['reason'] === 'string' ? args['reason'].slice(0, 200) : ''
+      const extra = typeof args['extra'] === 'string' ? args['extra'].slice(0, 120) : ''
+      store.record({
+        deviceId: device.deviceId,
+        kind: 'rpc',
+        target: `mobile/img/${phase}`,
+        detail: [path, reason, extra].filter((value) => value.length > 0).join(' · ').slice(0, 400),
+        ok: phase !== 'failed',
+      })
+      return { phase: phase }
     }
 
     if (endpoint.startsWith('mobile/files/')) {
@@ -3999,7 +4077,21 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
          * 其余出现只是注释；因此做一次整体替换即可，且**只在非默认值时才做** ✓。
          */
         const entryPath = options.entryPath !== undefined && options.entryPath.length > 0 ? options.entryPath : '/mobile/app'
-        const pairingHtml = entryPath === '/mobile/app' ? PAIRING_PAGE_HTML : PAIRING_PAGE_HTML.split('/mobile/app').join(entryPath)
+        /**
+         * ★★ 2026-11-03：**电脑端配对控制台的地址由宿主给出** ✓ ——
+         *   页面自己**不许**猜端口（旧版在手机侧用 `probeDesktopUrl` 去探
+         *   `127.0.0.1:location.port` / `:3080` ✗ —— 那只会在**手机自己**的回环上失败，
+         *   兜底还写成 `127.0.0.1:<DSH端口>/mobile` ✗，把用户指到没有维护的那条路上 ✓）。
+         *
+         *   真值只有一个来源：**明文监听**（`listener.bindings` 里非 IPv6 的 `plain`）✓。
+         *   电脑必须用它、并且只能用 `127.0.0.1:<这个端口>` ✓（局域网地址是手机角色 ✗）。
+         */
+        const plainBinding = options.listener
+          ?.status()
+          .bindings.find((binding) => binding.kind === 'plain' && !binding.ipv6)
+        const desktopUrl = plainBinding === undefined ? '' : `http://127.0.0.1:${plainBinding.port}/mobile`
+        const pageTemplate = entryPath === '/mobile/app' ? PAIRING_PAGE_HTML : PAIRING_PAGE_HTML.split('/mobile/app').join(entryPath)
+        const pairingHtml = pageTemplate.replace('__DSHM_DESKTOP_URL__', desktopUrl)
         const body = Buffer.from(pairingHtml, 'utf8')
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
@@ -4119,6 +4211,8 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
         // 端侧请求：让手机做事**只能从电脑本机发起**（否则同局域网的人就能指挥别人的手机）
         '/mobile/device/call',
         '/mobile/device/status',
+        // 临时诊断（只读一次工作区文件、只回错误）——只允许本机
+        '/mobile/debug/fs-probe',
       ])
       const PAIRING = new Set(['/mobile/pair/claim'])
 
