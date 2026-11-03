@@ -74,3 +74,12 @@ bundle 只给"行"（`id` / `name` ✓）；**这台机器**该用哪个地址�
    命令插入 / slash 触发源 / sidebarRight 这些 DSH 客户端钩子 ✓；桥的宿主半本来
    就是空 `apply` ✓，host 自己已有 cordis 行（客户端 bundle 注册要求的 graph 行 ✓）
    ⇒ **不需要第二个包** ✓，`blockExoticSubdeps` 也不会被触发 ✓。
+3. **2026-11-03 修：客户端的模块 id 必须等于包名** ✓ —— 本包的客户端要注册成
+   `id: '@dsh-mobile/host'` ✓（并入初版误抄成 `@dsh-mobile/bridge` ✗）。写错的后果是
+   DSH 的 web boot 直接失败：控制台 `duplicate factory registration for "@dsh-mobile/bridge"`
+   + `@dsh-mobile/host: import failed … loaded without registering` ✗ —— 表现就是
+   **一启用插件，DSH 页面就进不去**、只能禁用插件 ✓（看着像端口/启动顺序，其实不是 ✗）。
+   已装过单独 `@dsh-mobile/bridge` 的老用户：它现在是**多余**的（本包自带浏览器半 ✓），
+   删不删都不影响页面；**别再装第二个桥** ✓。升级到本版后重开 DSH + 刷新页面即可 ✓。
+   同版还顺手让局域网监听在 `EADDRINUSE` 时按 1/2/3/4 秒重试 4 次 ✓（旧进程正在退出的窗口
+   里自己把端口拿回来 ✓；真被别人占着仍如实报错 ✓）。
