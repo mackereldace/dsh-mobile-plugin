@@ -332,7 +332,7 @@ window.__ModuleLoader__.load({
        * `qrcode-generator` 画成 SVG ✓（`copy-client.mjs` 把它内联进 lib/client.js ✓）——
        * 不猜端口 ✗、不依赖宿主新路由 ✗、不受窗口 CSP/iframe 限制 ✓。
        *
-       * 只在电脑端注册 ✓：手机壳 / codex 页路径以 `/mobile/` 开头 ⇒ 那里的 `127.0.0.1` 是手机自己 ✗。
+       * 只在电脑端注册 ✓：手机壳 / 我们的页面路径以 `/mobile/` 开头 ⇒ 那里的 `127.0.0.1` 是手机自己 ✗。
        * `slots` 不写进 `inject`（少一个服务不能把文档预览一起拖垮 ✗）⇒ 拿不到时最多轮询 10 秒 ✓。
        */
       const registerPairingPanel = () => {
@@ -819,24 +819,18 @@ window.__ModuleLoader__.load({
            *   新版把这两个入口改成了**条件显示** ✓：
            *   · 子智能体目录（`ui-subagent` 的 `subagent-catalog`）只在**会话里有子智能体**时渲染 ✗；
            *   · dsh-purge 的标签片只挂在**视图 tab 行**，而 tab 行在"只有一个视图"时整行隐藏 ✗。
-           *   ⇒ 这里在 `conversation.session.header.actions` 槽里补两个**常驻**按钮 ✓：
-           *   · 「子智能体」：内置目录在就点它（不重复显示）；不在（0 个子智能体）就弹一句说明 ✓；
-           *   · 「dsh-purge」：点 dsh-purge 自己的启动器（`.dshp-launch` / `[data-testid=dsh-purge-launch]`）✓；
-           *     若 tab 行里已经有它的标签片（`.dshp-tab-chip`）就不重复 ✓。
+           *   ⇒ tab 行恢复后（developerTools ✓）：
+           *   · 子智能体入口**不再注入自定义 chip** ✗ —— 2026-11-04 用户：
+           *     "你电脑上做的这个子智能体入口也不是原生的" ⇒ 保留 DSH **原生**的
+           *     `subagent-catalog` / lineage ✓（它有自己的位置和显示条件，不再改它）✓；
+           *   · 标题行 actions 只保留 dsh-purge 的**兜底** ✓（tab 行已有标签片时自动隐藏）✓。
            *   只在电脑端注册 ✓（`/mobile/*` 上面已经提前 return ✓）。
            */
           const TopbarActions = () => {
-            const rootRef = React.useRef(null)
-            const [hasBuiltinSubagent, setHasBuiltinSubagent] = React.useState(false)
             const [hasInlinePurge, setHasInlinePurge] = React.useState(false)
-            const [hintOpen, setHintOpen] = React.useState(false)
-            const [hintAt, setHintAt] = React.useState({ left: 0, top: 0 })
             React.useEffect(() => {
               const check = () => {
-                const root = rootRef.current
                 try {
-                  const scope = root !== null && root.parentElement !== null ? root.parentElement : document
-                  setHasBuiltinSubagent(Boolean(scope.querySelector('button[aria-haspopup="tree"]')))
                   setHasInlinePurge(Boolean(document.querySelector('.dshp-tab-chip, [data-testid="dsh-purge-tab-chip"]')))
                 } catch (error) {
                   void error
@@ -846,7 +840,7 @@ window.__ModuleLoader__.load({
               let observer
               try {
                 observer = new MutationObserver(check)
-                observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'aria-haspopup'] })
+                observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
               } catch (error) {
                 void error
               }
@@ -856,12 +850,6 @@ window.__ModuleLoader__.load({
                 clearInterval(timer)
               }
             }, [])
-            React.useEffect(() => {
-              if (!hintOpen) return undefined
-              const close = () => setHintOpen(false)
-              document.addEventListener('pointerdown', close)
-              return () => document.removeEventListener('pointerdown', close)
-            }, [hintOpen])
             const chipStyle = {
               height: 26,
               padding: '0 8px',
@@ -878,63 +866,18 @@ window.__ModuleLoader__.load({
               gap: 4,
               whiteSpace: 'nowrap',
             }
-            const openSubagent = (event) => {
-              try {
-                const root = rootRef.current
-                const scope = root !== null && root.parentElement !== null ? root.parentElement : document
-                const trigger = scope.querySelector('button[aria-haspopup="tree"]')
-                if (trigger !== null) {
-                  trigger.click()
-                  return
-                }
-              } catch (error) {
-                void error
-              }
-              const rect = event.currentTarget.getBoundingClientRect()
-              setHintAt({ left: Math.min(rect.left, window.innerWidth - 280), top: rect.bottom + 6 })
-              setHintOpen((open) => !open)
-            }
             const openPurge = () => {
               const launcher =
                 document.querySelector('[data-testid="dsh-purge-launch"]') || document.querySelector('.dshp-launch')
               if (launcher !== null && typeof launcher.click === 'function') launcher.click()
             }
-            return React.createElement(
-              'div',
-              { ref: rootRef, style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-              hasBuiltinSubagent
-                ? null
-                : React.createElement(
-                    'button',
-                    { type: 'button', style: chipStyle, title: '子智能体：切换 / 查看本会话的子智能体', onClick: openSubagent },
-                    '子智能体',
-                  ),
-              hasInlinePurge ? null : React.createElement('button', { type: 'button', style: chipStyle, title: '打开 dsh-purge', onClick: openPurge }, 'dsh-purge'),
-              hintOpen
-                ? React.createElement(
-                    'div',
-                    {
-                      style: {
-                        position: 'fixed',
-                        left: hintAt.left,
-                        top: hintAt.top,
-                        zIndex: 2147483000,
-                        maxWidth: 270,
-                        padding: '8px 10px',
-                        borderRadius: 8,
-                        border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3))',
-                        background: 'var(--dsw-alias-bg-l1, #1f1f22)',
-                        color: 'inherit',
-                        fontSize: 12,
-                        lineHeight: 1.6,
-                        boxShadow: '0 6px 20px rgba(0,0,0,.25)',
-                      },
-                      onPointerDown: (event) => event.stopPropagation(),
-                    },
-                    '本会话暂无子智能体。运行子智能体后，这里会出现目录入口。',
-                  )
-                : null,
-            )
+            return hasInlinePurge
+              ? null
+              : React.createElement(
+                  'button',
+                  { type: 'button', style: chipStyle, title: '打开 dsh-purge', onClick: openPurge },
+                  'dsh-purge',
+                )
           }
           slots.inject('conversation.session.header.actions', () =>
             slots.register(
